@@ -530,6 +530,51 @@ def test_a_merge_that_drops_one_sides_entries_is_caught(repo):
     assert not report.ok
 
 
+def test_a_merge_of_duplicate_lines_can_report_a_false_inserted(repo):
+    """A known limit, pinned so it can't change quietly.
+
+    _embed places each parent at its leftmost positions, and a leftmost choice
+    can leave a hole another placement would have filled. Here A is [a, b] and
+    B is [a]; the result [a, a, b] accounts for both if B takes line 1 and A
+    takes lines 2-3, but leftmost gives A lines 1 and 3 and calls line 2
+    inserted. It needs genuinely duplicated lines, which is why real ledgers
+    don't meet it -- see test_two_concurrent_appends_of_distinct_entries below.
+
+    If someone fixes the algorithm this test fails, and the "Known limits"
+    section of the README needs deleting in the same commit.
+    """
+    repo.commit_file("LEDGER.md", "a\n", "add ledger")
+    repo.git("checkout", "-q", "-b", "side")
+    repo.commit_file("other.txt", "unrelated\n", "side does something else")
+    repo.git("checkout", "-q", "main")
+    repo.commit_file("LEDGER.md", "a\nb\n", "main appends b")
+    repo.merge("side")
+    repo.write("LEDGER.md", "a\na\nb\n")
+    repo.commit("merge side")
+
+    report = check_file("LEDGER.md", repo.path)
+
+    assert [v.kind for v in report.violations] == ["inserted"]
+
+
+def test_two_concurrent_appends_of_distinct_entries_are_clean(repo):
+    """The shape the false positive above does *not* reach.
+
+    Distinct entries -- dated, numbered, anything a real ledger has -- give
+    _embed no ambiguity to resolve badly.
+    """
+    repo.commit_file("LEDGER.md", "2026-01-01 base\n", "add ledger")
+    repo.git("checkout", "-q", "-b", "side")
+    repo.commit_file("LEDGER.md", "2026-01-01 base\n2026-01-02 side\n", "side")
+    repo.git("checkout", "-q", "main")
+    repo.commit_file("LEDGER.md", "2026-01-01 base\n2026-01-03 main\n", "main")
+    repo.merge("side")
+    repo.write("LEDGER.md", "2026-01-01 base\n2026-01-02 side\n2026-01-03 main\n")
+    repo.commit("merge side")
+
+    assert check_file("LEDGER.md", repo.path).ok
+
+
 # --- --since --------------------------------------------------------------
 
 

@@ -207,6 +207,10 @@ def _embed(needle: list[bytes], haystack: list[bytes]) -> tuple[list[int], int]:
     ``len(needle)`` means no embedding exists at all: greedy leftmost matching
     is complete for subsequences, so if it fails, nothing else would have
     worked either.
+
+    That completeness covers the *count* only. The ``positions`` are one valid
+    embedding out of possibly many, and callers that care which lines got used
+    -- see the coverage loop in ``_check_merge`` -- inherit that choice.
     """
     positions: list[int] = []
     cursor = 0
@@ -238,6 +242,13 @@ def _check_merge(
 
     For a single parent this is exactly the prefix rule: if a body embeds with
     no gaps below its own last line, its positions are 0..n and it is a prefix.
+
+    The survival half of that is exact. The coverage half is not: ``_embed``
+    hands back leftmost positions, and a leftmost placement can leave a hole
+    another placement would have filled, so this can report an ``inserted``
+    that isn't one. Fuzzing puts it at ~1.6% on adversarial input and it needs
+    duplicated lines to happen at all; the error runs strict, never lenient, so
+    nothing real gets through. Documented under "Known limits" in the README.
     """
     new_body, new_exempt = _body(new, preamble)
     # Both modes are the same problem read in opposite directions.

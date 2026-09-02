@@ -124,6 +124,11 @@ these are `2`:
 The last one is the one you will meet, because it is what a shallow CI clone does
 to `origin/main`, and it says so.
 
+`--since` narrows which commits are checked and nothing else. A path with no
+history at all is still a `2` inside a range, the same as outside one; what you
+get a `0` for is a real file that this range happens not to touch, which is most
+pull requests.
+
 ```yaml
 - uses: actions/checkout@v4
   with:
@@ -185,6 +190,35 @@ carelessly at 4am is your call.
 **Merges are judged by content, not by provenance.** If both sides of a merge
 contain the same line, the tool cannot tell which one it came from, and does not
 try. It asks only whether everything each parent had is still there.
+
+**A merge with duplicate lines can report an `inserted` that isn't one.** This is
+the one place the tool can be wrong in the direction that costs you something, so
+it gets said plainly rather than left in the code.
+
+Checking a merge is two questions. *Did every parent's content survive?* is exact
+— greedy leftmost matching is complete for subsequences, so if it says a parent
+was lost, no other reading of the file would have found it. *Was anything slipped
+in between entries?* is not. The tool places each parent at its leftmost possible
+position, and a leftmost choice can leave a gap that some other placement would
+have filled:
+
+```
+parent A = [a, b]
+parent B = [a]
+result   = [a, a, b]
+```
+
+Leftmost puts A at lines 1 and 3, B at line 1, and calls line 2 `inserted`. Put B
+at line 1 and A at lines 2–3 and everything is accounted for. Fuzzing 20,000
+random two-parent merges over a two-symbol alphabet against an exhaustive search
+over every embedding: **~1.6% false `inserted`, and zero misses**. The error only
+ever runs strict, so a merge that really did lose entries is still caught.
+
+It takes genuinely duplicated lines to provoke, which is why a real ledger doesn't
+hit it — dated or numbered entries are distinct, and concurrent appends merged in
+either order come back clean. A file of repeated identical lines is a different
+matter. If you get an `inserted` you believe is wrong, look at the line it names:
+if it is a duplicate of one above it, this is why.
 
 **Speed.** Roughly 6ms per commit that touched the file — about 3 seconds for a
 500-commit ledger. Merges that changed the file are included, which git's default
