@@ -122,7 +122,14 @@ def _parse_changes(lines: list[str]) -> tuple[Change, ...]:
     return tuple(changes)
 
 
-def _log(path: str, cwd: str, *, follow: bool, since: str | None) -> list[Commit]:
+def _log(
+    path: str,
+    cwd: str,
+    *,
+    follow: bool,
+    since: str | None,
+    full_history: bool = False,
+) -> list[Commit]:
     args = [
         # Without this git escapes non-ASCII paths into C-style quoted strings
         # and our tab split stops lining up with reality.
@@ -132,6 +139,8 @@ def _log(path: str, cwd: str, *, follow: bool, since: str | None) -> list[Commit
         f"--format={_FORMAT}",
         "--name-status",
     ]
+    if full_history:
+        args.append("--full-history")
     if follow:
         args.append("--follow")
     if since:
@@ -188,11 +197,19 @@ def file_history(
 ) -> list[HistoryEntry]:
     """Commits that touched ``path``, newest first, including merge commits.
 
-    ``git log --follow`` is used only to work out the file's previous names. It
-    is deliberately not used to enumerate the commits, because ``--follow``
-    drops merge commits from its output entirely -- which would hide a merge
-    that resolved a conflict by throwing away half the file. Each name in the
-    chain gets its own plain ``git log``, which does report merges.
+    Two separate pieces of git behaviour conspire to hide exactly the commits
+    this tool is looking for, and both have to be turned off.
+
+    ``git log --follow`` drops merge commits from its output entirely, so it is
+    used only to work out the file's previous names, never to enumerate the
+    commits. Each name in the chain gets its own log instead.
+
+    ``git log -- <path>`` then applies history simplification, which prunes any
+    merge that is TREESAME to one of its parents. A merge that resolved a
+    conflict by discarding one side is TREESAME to the side it kept, so the
+    default view omits both the merge *and* the entries it threw away.
+    ``--full-history`` keeps them. It still only reports merges where the file
+    differed between the sides, so this is not the whole repository's history.
     """
     names = rename_chain(path, cwd, since=since) if follow else [path]
     # (sha, new name) -> previous name, for the commits that did the renaming.
@@ -214,7 +231,7 @@ def file_history(
     # Names are newest first and their histories do not overlap in time, so
     # concatenating the segments keeps the whole list newest first.
     for name in names:
-        for commit in _log(name, cwd, follow=False, since=since):
+        for commit in _log(name, cwd, follow=False, since=since, full_history=True):
             key = (commit.sha, name)
             if key in seen or key in rename_shas:
                 continue
