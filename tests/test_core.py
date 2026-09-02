@@ -551,3 +551,25 @@ def test_since_with_no_commits_in_range_is_clean_not_an_error(repo):
 
     assert report.ok
     assert report.commits_checked == 0
+
+
+def test_since_with_an_untracked_path_is_an_error_not_a_clean_run(repo):
+    """The two ways to get zero commits are not the same answer.
+
+    "Nothing happened in this range" is clean. "I have never heard of this
+    file" is an error, with or without --since.
+    """
+    repo.commit_file("LEDGER.md", "one\n", "add")
+    head = repo.git("rev-parse", "HEAD").strip()
+
+    with pytest.raises(PathNotTracked):
+        check_file("TYPO.md", repo.path, since=head)
+
+
+def test_since_with_an_untracked_path_is_an_error_without_follow(repo):
+    """The existence check has to honour --no-follow like the real walk does."""
+    repo.commit_file("LEDGER.md", "one\n", "add")
+    head = repo.git("rev-parse", "HEAD").strip()
+
+    with pytest.raises(PathNotTracked):
+        check_file("TYPO.md", repo.path, follow=False, since=head)

@@ -76,6 +76,42 @@ def test_unknown_revision_is_explained_in_words(repo, capsys):
     assert "rev-parse" not in err, "this is a message for a person, not a shell log"
 
 
+def test_since_with_an_empty_range_exits_0(repo):
+    """A pull request that doesn't touch the ledger has to pass."""
+    repo.commit_file("LEDGER.md", "one\n", "add")
+    base = repo.git("rev-parse", "HEAD").strip()
+    repo.commit_file("other.txt", "unrelated\n", "something else")
+
+    assert run(repo, "--since", base, "LEDGER.md") == EXIT_OK
+
+
+def test_since_does_not_turn_a_typo_into_a_clean_pass(repo, capsys):
+    """--since used to launder a bad path from a 2 into a 0.
+
+    Reachable from the line the README recommends for CI, which is what made it
+    the worst of the "reported clean without checking anything" family.
+    """
+    repo.commit_file("LEDGER.md", "one\n", "add")
+    repo.commit_file("LEDGER.md", "one\ntwo\n", "append")
+    base = repo.git("rev-parse", "HEAD~1").strip()
+
+    assert run(repo, "TYPO.md") == EXIT_ERROR
+    capsys.readouterr()
+
+    assert run(repo, "--since", base, "TYPO.md") == EXIT_ERROR
+    assert "no history" in capsys.readouterr().err
+
+
+def test_since_with_a_path_created_after_the_revision_still_checks_it(repo):
+    """The file has no history *before* the range, which is not a typo."""
+    repo.commit_file("other.txt", "unrelated\n", "first")
+    base = repo.git("rev-parse", "HEAD").strip()
+    repo.commit_file("LEDGER.md", "one\ntwo\n", "add the ledger")
+    repo.commit_file("LEDGER.md", "one\nEDITED\n", "rewrite")
+
+    assert run(repo, "--since", base, "LEDGER.md") == EXIT_VIOLATIONS
+
+
 def test_header_over_run_exits_2_not_0(repo, capsys):
     """The likeliest misconfiguration there is, and it used to pass silently."""
     repo.commit_file("LEDGER.md", "# Title\n\none\ntwo\n", "add")

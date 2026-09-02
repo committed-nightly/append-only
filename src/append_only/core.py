@@ -300,8 +300,15 @@ def check_file(
     report = Report(path=path, mode=mode, preamble=preamble)
 
     if not history:
-        if since is not None:
-            # An empty range is a legitimate "nothing happened", not a typo.
+        # An empty range is a legitimate "nothing happened" -- a pull request
+        # that doesn't touch the ledger has to pass. A path that has no history
+        # at all is a typo, and --since must not launder one into the other:
+        # that is the same "reported clean without looking" this tool exists to
+        # catch, arriving through the invocation the README recommends for CI.
+        # The existence question is asked with the same call and the same
+        # --follow setting as the real walk, so there is only ever one notion of
+        # "this file has a history".
+        if since is not None and file_history(path, cwd, follow=follow):
             return report
         raise PathNotTracked(path)
 
