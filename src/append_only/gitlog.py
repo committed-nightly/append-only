@@ -27,9 +27,9 @@ class GitError(RuntimeError):
 class Change:
     """One entry from ``--name-status`` for a commit."""
 
-    status: str  # A, M, D, R100, ...
+    status: str  # A, M, D, R100, C100, ...
     path: str
-    old_path: str | None = None  # set for renames and copies
+    old_path: str | None = None  # set for renames only, never for copies
 
 
 @dataclass(frozen=True)
@@ -110,8 +110,13 @@ def _parse_changes(lines: list[str]) -> tuple[Change, ...]:
             continue
         parts = line.split("\t")
         status = parts[0]
-        if status.startswith(("R", "C")) and len(parts) >= 3:
+        if status.startswith("R") and len(parts) >= 3:
             changes.append(Change(status=status, path=parts[2], old_path=parts[1]))
+        elif status.startswith("C") and len(parts) >= 3:
+            # A copy is not a rename. The source file still exists, so the copy
+            # is a brand new file with no prior version of its own to preserve.
+            # Following it would blame this file for the source's later edits.
+            changes.append(Change(status=status, path=parts[2]))
         elif len(parts) >= 2:
             changes.append(Change(status=status, path=parts[1]))
     return tuple(changes)

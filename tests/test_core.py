@@ -190,6 +190,17 @@ def test_an_edit_made_during_a_rename_is_still_caught(repo):
     assert report.violations[0].line == 4
 
 
+def test_a_file_copied_from_another_does_not_inherit_its_history(repo):
+    """git reports an identical new file as a copy; a copy is not a rename."""
+    repo.commit_file("A.md", "one\ntwo\n", "add a")
+    repo.commit_file("B.md", "one\ntwo\n", "add b, identical to a")
+    repo.commit_file("A.md", "one\nEDITED\n", "rewrite a")
+    repo.commit_file("B.md", "one\ntwo\nthree\n", "honestly append to b")
+
+    assert not check_file("A.md", repo.path).ok
+    assert check_file("B.md", repo.path).ok
+
+
 def test_no_follow_stops_at_the_rename(repo):
     repo.commit_file("OLD.md", "one\ntwo\n", "add ledger")
     repo.git("mv", "OLD.md", "NEW.md")
