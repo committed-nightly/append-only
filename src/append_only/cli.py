@@ -16,9 +16,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 
-from .core import Mode, PathNotTracked, Report, check_file
+from .core import Mode, NothingChecked, PathNotTracked, Report, check_file
 from .gitlog import GitError, repo_root, resolve
 
 EXIT_OK = 0
@@ -47,15 +48,25 @@ def _build_parser() -> argparse.ArgumentParser:
             "prepend: new content must go at the top, as in Keep a Changelog."
         ),
     )
-    parser.add_argument(
+    exempt = parser.add_mutually_exclusive_group()
+    exempt.add_argument(
+        "--after",
+        metavar="REGEX",
+        help=(
+            "exempt every line above the first one matching REGEX, recomputed "
+            "for each version of the file. Match what an entry looks like, e.g. "
+            "'^## '. Prefer this over --header: it survives preamble edits"
+        ),
+    )
+    exempt.add_argument(
         "--header",
         type=int,
         default=0,
         metavar="N",
         help=(
-            "exempt the first N lines from the check, so a title and preamble "
-            "can be edited freely. Required for prepend mode on any file with "
-            "a heading (default: 0)"
+            "exempt the first N lines from the check. Simpler than --after and "
+            "worse: adding a line to the preamble shifts every entry down and "
+            "the check reports a violation for a legal edit (default: 0)"
         ),
     )
     parser.add_argument(
@@ -89,7 +100,8 @@ def _report_to_dict(report: Report) -> dict:
     return {
         "path": report.path,
         "mode": report.mode.value,
-        "header": report.header,
+        "header": report.preamble.lines,
+        "after": report.preamble.after.pattern if report.preamble.after else None,
         "commits_checked": report.commits_checked,
         "ok": report.ok,
         "violations": [
@@ -134,6 +146,36 @@ def _print_human(report: Report, out) -> None:
             print(f"    {line}", file=out)
 
 
+def _nothing_checked(exc: NothingChecked, args) -> list[str]:
+    """Explain a run that inspected nothing, and say what to do about it.
+
+    All of these end in exit 2 rather than 0. Reporting "clean" for a file the
+    tool never actually looked at is the exact failure a gate is supposed to
+    prevent, and it is worse than having no gate, because it comes with a tick
+    next to it.
+    """
+    commits = _plural(exc.commits, "commit")
+    if exc.reason == "not-a-file":
+        return [
+            f"append-only: {exc.path} is not a file in this repository.",
+            f"  {commits} touched that path, but no version of it is a regular "
+            "file — a directory, or a submodule? Nothing was checked.",
+        ]
+    if args.after is not None:
+        return [
+            f"append-only: no line of {exc.path} matched --after {args.after!r}, "
+            "in any version.",
+            f"  Every one of {commits} was exempt in full. Nothing was checked — "
+            "does the pattern match what an entry actually looks like?",
+        ]
+    return [
+        f"append-only: --header {args.header} exempts the whole of {exc.path} "
+        "in every version.",
+        f"  {commits} touched it and none of them were checked. Count the "
+        "preamble again, or use --after to stop counting lines by hand.",
+    ]
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     out = sys.stdout
@@ -142,6 +184,17 @@ def main(argv: list[str] | None = None) -> int:
         print("append-only: --header must be 0 or more", file=sys.stderr)
         return EXIT_ERROR
 
+    if args.after is not None:
+        try:
+            re.compile(args.after)
+        except re.error as exc:
+            print(
+                f"append-only: --after {args.after!r} is not a valid regular "
+                f"expression: {exc}",
+                file=sys.stderr,
+            )
+            return EXIT_ERROR
+
     directory = args.directory
     if not os.path.isdir(directory):
         print(f"append-only: no such directory: {directory}", file=sys.stderr)
@@ -149,11 +202,25 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         repo_root(directory)
-        if args.since:
-            resolve(args.since, directory)
     except GitError as exc:
         print(f"append-only: {exc}", file=sys.stderr)
         return EXIT_ERROR
+
+    if args.since:
+        try:
+            resolve(args.since, directory)
+        except GitError:
+            print(
+                f"append-only: --since {args.since}: no such revision in this "
+                "repository.",
+                file=sys.stderr,
+            )
+            print(
+                "  On CI this is usually a shallow clone — actions/checkout "
+                "needs fetch-depth: 0 before origin/main resolves.",
+                file=sys.stderr,
+            )
+            return EXIT_ERROR
 
     reports: list[Report] = []
     for path in args.paths:
@@ -164,6 +231,7 @@ def main(argv: list[str] | None = None) -> int:
                     directory,
                     mode=Mode(args.mode),
                     header=args.header,
+                    after=args.after,
                     follow=not args.no_follow,
                     since=args.since,
                 )
@@ -174,6 +242,10 @@ def main(argv: list[str] | None = None) -> int:
                 "(wrong path, or never committed?)",
                 file=sys.stderr,
             )
+            return EXIT_ERROR
+        except NothingChecked as exc:
+            for line in _nothing_checked(exc, args):
+                print(line, file=sys.stderr)
             return EXIT_ERROR
         except GitError as exc:
             print(f"append-only: {exc}", file=sys.stderr)

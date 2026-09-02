@@ -7,6 +7,9 @@ CI gate is decorative. So each of 0, 1 and 2 gets its own test.
 from __future__ import annotations
 
 import json
+import os
+
+import pytest
 
 from append_only.cli import EXIT_ERROR, EXIT_OK, EXIT_VIOLATIONS, main
 
@@ -61,6 +64,58 @@ def test_unknown_revision_exits_2(repo, capsys):
     assert capsys.readouterr().err.strip()
 
 
+def test_unknown_revision_is_explained_in_words(repo, capsys):
+    """This fires when CI cloned shallow, so it has to say that."""
+    repo.commit_file("LEDGER.md", "one\n", "add")
+
+    run(repo, "--since", "origin/main", "LEDGER.md")
+    err = capsys.readouterr().err
+
+    assert "no such revision" in err
+    assert "fetch-depth" in err
+    assert "rev-parse" not in err, "this is a message for a person, not a shell log"
+
+
+def test_header_over_run_exits_2_not_0(repo, capsys):
+    """The likeliest misconfiguration there is, and it used to pass silently."""
+    repo.commit_file("LEDGER.md", "# Title\n\none\ntwo\n", "add")
+    repo.commit_file("LEDGER.md", "# Title\n\none\nEDITED\n", "rewrite")
+
+    assert run(repo, "--header", "2", "LEDGER.md") == EXIT_VIOLATIONS
+    assert run(repo, "--header", "9999", "LEDGER.md") == EXIT_ERROR
+    assert "exempts the whole of LEDGER.md" in capsys.readouterr().err
+
+
+def test_an_after_pattern_that_matches_nothing_exits_2_not_0(repo, capsys):
+    repo.commit_file("LEDGER.md", "one\ntwo\n", "add")
+    repo.commit_file("LEDGER.md", "one\nEDITED\n", "rewrite")
+
+    assert run(repo, "--after", "^NOPE", "LEDGER.md") == EXIT_ERROR
+    assert "matched --after" in capsys.readouterr().err
+
+
+def test_a_directory_exits_2_not_0(repo, capsys):
+    os.mkdir(f"{repo.path}/notes")
+    repo.commit_file("notes/a.md", "one\n", "add a note")
+
+    assert run(repo, "notes") == EXIT_ERROR
+    assert "is not a file" in capsys.readouterr().err
+
+
+def test_after_and_header_cannot_both_be_given(repo):
+    repo.commit_file("LEDGER.md", "one\n", "add")
+
+    with pytest.raises(SystemExit):
+        run(repo, "--after", "^---$", "--header", "2", "LEDGER.md")
+
+
+def test_a_broken_after_regex_exits_2(repo, capsys):
+    repo.commit_file("LEDGER.md", "one\n", "add")
+
+    assert run(repo, "--after", "^(unclosed", "LEDGER.md") == EXIT_ERROR
+    assert "not a valid regular expression" in capsys.readouterr().err
+
+
 def test_negative_header_exits_2(repo, capsys):
     repo.commit_file("LEDGER.md", "one\n", "add")
 
@@ -96,6 +151,17 @@ def test_json_output_is_valid_and_complete(repo, capsys):
     assert report["path"] == "LEDGER.md"
     assert report["violations"][0]["kind"] == "rewrote"
     assert report["violations"][0]["line"] == 2
+
+
+def test_json_records_which_preamble_rule_was_used(repo, capsys):
+    repo.commit_file("LEDGER.md", "# Title\n---\none\n", "add")
+    repo.commit_file("LEDGER.md", "# Title\n---\none\ntwo\n", "append")
+
+    run(repo, "--json", "--after", "^---$", "LEDGER.md")
+    report = json.loads(capsys.readouterr().out)["reports"][0]
+
+    assert report["after"] == "^---$"
+    assert report["header"] == 0
 
 
 def test_quiet_prints_nothing_but_still_signals(repo, capsys):
