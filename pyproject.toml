@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "append-only"
+version = "0.1.0"
+description = "Check that a file has only ever been appended to, across its whole git history."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+keywords = ["git", "changelog", "ledger", "audit", "ci"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Version Control :: Git",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+append-only = "append_only.cli:main"
+
+[project.urls]
+Source = "https://github.com/committed-nightly/append-only"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/append_only"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
