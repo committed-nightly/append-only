@@ -3,7 +3,7 @@
 from .core import Mode, PathNotTracked, Report, Violation, check_file
 from .gitlog import GitError
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "GitError",
