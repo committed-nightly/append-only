@@ -1,8 +1,24 @@
 from __future__ import annotations
 
+import os
 import subprocess
 
 import pytest
+
+# Identity for the commits the tests make, forced through the environment.
+#
+# `git config user.name` is not enough. GIT_AUTHOR_NAME and friends beat every
+# config file, so on a machine that exports them -- CI runners and bot
+# harnesses do -- the repo-local config set below loses silently and commits
+# come out authored by whoever the environment says. Only the assertion on the
+# author name in test_cli.py notices, which makes it look like a bug in the
+# tool rather than in the fixture.
+_IDENTITY = {
+    "GIT_AUTHOR_NAME": "Test Person",
+    "GIT_AUTHOR_EMAIL": "test@example.invalid",
+    "GIT_COMMITTER_NAME": "Test Person",
+    "GIT_COMMITTER_EMAIL": "test@example.invalid",
+}
 
 
 class Repo:
@@ -18,6 +34,7 @@ class Repo:
             capture_output=True,
             check=check,
             text=True,
+            env={**os.environ, **_IDENTITY},
         )
         return proc.stdout
 
