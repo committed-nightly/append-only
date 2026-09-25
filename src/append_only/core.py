@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import difflib
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -95,6 +96,11 @@ class Violation:
     # is where the content that came from nowhere actually is.
     line: int | None
     excerpt: str
+    # Named in the caller's allow list: still found, still reported, but not a
+    # failure. An excused violation is never dropped from the report -- the
+    # whole argument for having exceptions at all is that they stay visible.
+    allowed: bool = False
+    reason: str | None = None
 
     def describe(self) -> str:
         if self.kind == "deleted":
@@ -114,10 +120,24 @@ class Report:
     preamble: Preamble
     commits_checked: int = 0
     violations: list[Violation] = field(default_factory=list)
+    # Allowed commits that this run walked and found nothing wrong with: the
+    # exception has outlived whatever it was for.
+    allow_unused: list[str] = field(default_factory=list)
+    # Allowed commits that never appear in the walked history of this path.
+    # Expected under --since, a mistake without it.
+    allow_absent: list[str] = field(default_factory=list)
+
+    @property
+    def failures(self) -> list[Violation]:
+        return [v for v in self.violations if not v.allowed]
+
+    @property
+    def excused(self) -> list[Violation]:
+        return [v for v in self.violations if v.allowed]
 
     @property
     def ok(self) -> bool:
-        return not self.violations
+        return not self.failures
 
 
 def _lines(content: bytes) -> list[bytes]:
@@ -304,9 +324,17 @@ def check_file(
     after: str | None = None,
     follow: bool = True,
     since: str | None = None,
+    allow: Mapping[str, str | None] | None = None,
 ) -> Report:
-    """Walk the history of ``path`` and report every change that wasn't an append."""
+    """Walk the history of ``path`` and report every change that wasn't an append.
+
+    ``allow`` maps a *full* commit sha to the reason its violation is accepted.
+    Those commits are still walked and still reported; they just don't make the
+    report fail. Resolving whatever the user typed into a full sha is the
+    caller's job, because that takes git and this function is handed facts.
+    """
     preamble = Preamble(lines=header, after=re.compile(after) if after else None)
+    allow = dict(allow or {})
     history = file_history(path, cwd, follow=follow, since=since)
     report = Report(path=path, mode=mode, preamble=preamble)
 
@@ -328,10 +356,33 @@ def check_file(
     saw_blob = False
     saw_body = False
 
+    # Which commits this run actually looked at, and which of the allowed ones
+    # turned out to need allowing. The difference is what tells a live
+    # exception from a dead one.
+    walked: set[str] = set()
+    excused: set[str] = set()
+
+    def record(commit: Commit, kind: str, path_here: str, line, excerpt) -> None:
+        allowed = commit.sha in allow
+        if allowed:
+            excused.add(commit.sha)
+        report.violations.append(
+            Violation(
+                commit=commit,
+                kind=kind,
+                path=path_here,
+                line=line,
+                excerpt=excerpt,
+                allowed=allowed,
+                reason=allow.get(commit.sha),
+            )
+        )
+
     for entry in history:
         commit, path_here = entry.commit, entry.path
         new = blob_at(commit.sha, path_here, cwd)
         report.commits_checked += 1
+        walked.add(commit.sha)
 
         olds = []
         for parent in commit.parents:
@@ -344,15 +395,7 @@ def check_file(
         if new is None:
             # Gone in this commit. That is only news if a parent had it.
             if olds:
-                report.violations.append(
-                    Violation(
-                        commit=commit,
-                        kind="deleted",
-                        path=path_here,
-                        line=None,
-                        excerpt="",
-                    )
-                )
+                record(commit, "deleted", path_here, None, "")
             continue
 
         saw_blob = True
@@ -372,15 +415,7 @@ def check_file(
 
         if result is not None:
             kind, line, excerpt = result
-            report.violations.append(
-                Violation(
-                    commit=commit,
-                    kind=kind,
-                    path=path_here,
-                    line=line,
-                    excerpt=excerpt,
-                )
-            )
+            record(commit, kind, path_here, line, excerpt)
 
     if not saw_blob:
         raise NothingChecked(path, "not-a-file", report.commits_checked)
@@ -389,6 +424,18 @@ def check_file(
         # any version. Either way the preamble ate the file and the run has no
         # opinion about anything.
         raise NothingChecked(path, "all-exempt", report.commits_checked)
+
+    # An exception that excuses nothing is the kind of dead configuration this
+    # tool exists to find, so it gets classified rather than ignored. Insertion
+    # order is the order the user wrote them in, which is the order to read
+    # them back in.
+    for sha in allow:
+        if sha in excused:
+            continue
+        if sha in walked:
+            report.allow_unused.append(sha)
+        else:
+            report.allow_absent.append(sha)
 
     # Oldest first reads better in a report: it is the order things happened.
     report.violations.reverse()
