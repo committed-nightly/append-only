@@ -26,6 +26,47 @@ EXIT_OK = 0
 EXIT_VIOLATIONS = 1
 EXIT_ERROR = 2
 
+# An exception has to name one commit that cannot turn into a different commit
+# later. Seven is git's usual floor for an abbreviation you'd write down.
+_SHA = re.compile(r"\A[0-9a-fA-F]{7,40}\Z")
+
+
+class AllowFileError(ValueError):
+    """A line of the allow file isn't a sha and a reason."""
+
+    def __init__(self, path: str, lineno: int, message: str) -> None:
+        super().__init__(message)
+        self.path = path
+        self.lineno = lineno
+        self.message = message
+
+
+def _parse_allow_file(path: str) -> list[tuple[str, str | None]]:
+    """Read ``sha [reason]`` lines. Blank lines and whole-line # are comments.
+
+    The reason is the rest of the line, with a leading ``#`` stripped so that
+    both of the ways people naturally write it mean the same thing::
+
+        2dca89db4 cosmetic quoting fix, logbook#27
+        2dca89db4 # cosmetic quoting fix, logbook#27
+    """
+    entries: list[tuple[str, str | None]] = []
+    with open(path, encoding="utf-8") as handle:
+        for lineno, raw in enumerate(handle, start=1):
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split(None, 1)
+            token = parts[0]
+            rest = parts[1] if len(parts) > 1 else ""
+            reason = rest.strip().lstrip("#").strip() or None
+            if not _SHA.match(token):
+                raise AllowFileError(
+                    path, lineno, f"{token!r} is not a commit sha"
+                )
+            entries.append((token, reason))
+    return entries
+
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -75,6 +116,25 @@ def _build_parser() -> argparse.ArgumentParser:
         help="only check commits after REV, e.g. --since origin/main",
     )
     parser.add_argument(
+        "--allow",
+        action="append",
+        metavar="SHA",
+        help=(
+            "accept the violation in commit SHA: keep checking everything "
+            "else, and keep reporting this one. Repeatable. A commit sha "
+            "only — not a branch or a revision expression"
+        ),
+    )
+    parser.add_argument(
+        "--allow-from",
+        metavar="FILE",
+        help=(
+            "read allowed commits from FILE, one sha per line, with the "
+            "reason for each on the rest of its line. Blank lines and lines "
+            "starting with # are ignored"
+        ),
+    )
+    parser.add_argument(
         "--no-follow",
         action="store_true",
         help="don't track the file across renames",
@@ -104,6 +164,7 @@ def _report_to_dict(report: Report) -> dict:
         "after": report.preamble.after.pattern if report.preamble.after else None,
         "commits_checked": report.commits_checked,
         "ok": report.ok,
+        "allowed": len(report.excused),
         "violations": [
             {
                 "commit": v.commit.sha,
@@ -115,6 +176,8 @@ def _report_to_dict(report: Report) -> dict:
                 "line": v.line,
                 "description": v.describe(),
                 "excerpt": v.excerpt,
+                "allowed": v.allowed,
+                "reason": v.reason,
             }
             for v in report.violations
         ],
@@ -126,8 +189,10 @@ def _plural(n: int, word: str) -> str:
 
 
 def _print_human(report: Report, out) -> None:
-    count = len(report.violations)
-    summary = "clean" if report.ok else _plural(count, "violation")
+    excused = report.excused
+    summary = "clean" if report.ok else _plural(len(report.failures), "violation")
+    if excused:
+        summary += f" ({len(excused)} allowed)"
     print(
         f"{report.path} — {_plural(report.commits_checked, 'commit')} checked, "
         f"{summary}",
@@ -142,8 +207,46 @@ def _print_human(report: Report, out) -> None:
             file=out,
         )
         print(f"    {violation.describe()}", file=out)
+        if violation.allowed:
+            # No excerpt. An accepted violation is one you have already read;
+            # printing the diff for all nine of them buries the one that isn't.
+            print(f"    allowed: {violation.reason or 'no reason given'}", file=out)
+            continue
         for line in violation.excerpt.splitlines():
             print(f"    {line}", file=out)
+
+
+def _dead_allow_notes(
+    allow: dict[str, str | None], reports: list[Report], since: str | None
+) -> list[str]:
+    """Complain about exceptions that excused nothing anywhere.
+
+    Judged across every path in the run, not per report: with two paths and one
+    allow, the path the commit does not touch would otherwise nag about an
+    exception that is doing its job on the other one.
+
+    An allowed commit missing from the history entirely is only worth
+    mentioning when the whole history was on the table. Under --since it is the
+    ordinary case -- an exception older than the baseline, still written down
+    so it survives the baseline moving.
+    """
+    used = {v.commit.sha for r in reports for v in r.violations if v.allowed}
+    walked = {sha for r in reports for sha in r.allow_unused}
+    notes = []
+    for sha in allow:
+        if sha in used:
+            continue
+        if sha in walked:
+            notes.append(
+                f"append-only: --allow {sha[:9]} is not needed — that commit "
+                "was checked and kept the rule. Drop it."
+            )
+        elif since is None:
+            notes.append(
+                f"append-only: --allow {sha[:9]} never touched "
+                f"{', '.join(r.path for r in reports)}."
+            )
+    return notes
 
 
 def _nothing_checked(exc: NothingChecked, args) -> list[str]:
@@ -174,6 +277,55 @@ def _nothing_checked(exc: NothingChecked, args) -> list[str]:
         f"  {commits} touched it and none of them were checked. Count the "
         "preamble again, or use --after to stop counting lines by hand.",
     ]
+
+
+def _resolve_allow(
+    args, directory: str
+) -> tuple[dict[str, str | None], list[str] | None]:
+    """Turn --allow / --allow-from into {full sha: reason}, or explain why not.
+
+    Everything is resolved against the repository up front. A sha nobody can
+    resolve is exit 2 rather than a silently inert exception, for the same
+    reason an unknown --since is: the run would otherwise report a verdict
+    about a configuration it never applied.
+    """
+    specs: list[tuple[str, str | None]] = []
+    if args.allow_from:
+        try:
+            specs += _parse_allow_file(args.allow_from)
+        except OSError as exc:
+            return {}, [f"append-only: --allow-from {args.allow_from}: {exc.strerror}."]
+        except AllowFileError as exc:
+            return {}, [
+                f"append-only: {exc.path}:{exc.lineno}: {exc.message}.",
+                "  Each line is a commit sha, then the reason it is accepted. "
+                "Use # for a comment.",
+            ]
+    specs += [(sha, None) for sha in args.allow or []]
+
+    allow: dict[str, str | None] = {}
+    for token, reason in specs:
+        if not _SHA.match(token):
+            return {}, [
+                f"append-only: --allow {token!r} is not a commit sha.",
+                "  An exception has to name one immutable commit. A branch or "
+                "a revision expression would quietly come to mean a different "
+                "commit later, which is not an exception, it is a hole.",
+            ]
+        try:
+            full = resolve(token, directory)
+        except GitError:
+            return {}, [
+                f"append-only: --allow {token}: no such commit in this "
+                "repository.",
+                "  On CI this is usually a shallow clone — actions/checkout "
+                "needs fetch-depth: 0 before an old sha resolves.",
+            ]
+        # First mention wins the reason, so a file entry keeps its reason even
+        # if the same sha turns up again bare on the command line.
+        if full not in allow or allow[full] is None:
+            allow[full] = reason
+    return allow, None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -222,6 +374,12 @@ def main(argv: list[str] | None = None) -> int:
             )
             return EXIT_ERROR
 
+    allow, failure = _resolve_allow(args, directory)
+    if failure is not None:
+        for line in failure:
+            print(line, file=sys.stderr)
+        return EXIT_ERROR
+
     reports: list[Report] = []
     for path in args.paths:
         try:
@@ -234,6 +392,7 @@ def main(argv: list[str] | None = None) -> int:
                     after=args.after,
                     follow=not args.no_follow,
                     since=args.since,
+                    allow=allow,
                 )
             )
         except PathNotTracked:
@@ -252,8 +411,16 @@ def main(argv: list[str] | None = None) -> int:
             return EXIT_ERROR
 
     if args.json and not args.quiet:
+        used = {v.commit.sha for r in reports for v in r.violations if v.allowed}
+        walked = {sha for r in reports for sha in r.allow_unused}
         payload = {
             "ok": all(r.ok for r in reports),
+            # Three states, kept apart rather than merged into "dead": whether
+            # an absent exception is a problem depends on --since, and that is
+            # the caller's call to make, not ours.
+            "allow_used": sorted(used),
+            "allow_unused": sorted(walked - used),
+            "allow_absent": sorted(set(allow) - used - walked),
             "reports": [_report_to_dict(r) for r in reports],
         }
         print(json.dumps(payload, indent=2), file=out)
@@ -262,6 +429,8 @@ def main(argv: list[str] | None = None) -> int:
             if index:
                 print(file=out)
             _print_human(report, out)
+        for note in _dead_allow_notes(allow, reports, args.since):
+            print(note, file=out)
 
     return EXIT_OK if all(r.ok for r in reports) else EXIT_VIOLATIONS
 

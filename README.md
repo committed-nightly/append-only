@@ -23,7 +23,8 @@ Python 3.10+. No dependencies — it shells out to `git`, which you already have
 ## Usage
 
 ```
-append-only [--mode append|prepend] [--after REGEX] [--since REV] PATH [PATH...]
+append-only [--mode append|prepend] [--after REGEX] [--since REV]
+            [--allow SHA] [--allow-from FILE] PATH [PATH...]
 ```
 
 Run it on a ledger:
@@ -58,6 +59,8 @@ docs/decisions.md — 12 commits checked, clean
 | `--after REGEX` | exempt every line above the first one matching `REGEX`, so a title and preamble can be edited freely. |
 | `--header N` | exempt the first N lines instead. Simpler, and worse — see below. |
 | `--since REV` | only check commits after `REV`. `--since origin/main` is the fast path for a PR check. |
+| `--allow SHA` | accept the violation in `SHA` and keep checking everything else. Repeatable. |
+| `--allow-from FILE` | read allowed commits, and the reason for each, from a file. |
 | `--no-follow` | don't track the file across renames. |
 | `-C DIR` | run as if started in `DIR`. |
 | `--json` | machine-readable output. |
@@ -120,6 +123,10 @@ these are `2`:
 - `--header N` is bigger than the file in every version
 - `--after` matches no line in any version
 - `--since` names a revision that doesn't exist
+- `--allow` names something that isn't a commit sha, or a sha that doesn't
+  resolve here
+- `--allow-from` names a file that isn't there, or one with a line that isn't a
+  sha
 
 The last one is the one you will meet, because it is what a shallow CI clone does
 to `origin/main`, and it says so.
@@ -226,16 +233,106 @@ log hides; on a merge-heavy repo that is more commits than `git log` would show
 you for the same path. Fine as a gate; use `--since origin/main` on pull requests
 if your ledger is much older than that.
 
+## When a bad commit is already in history
+
+Someone edits an old line. You notice, and you would undo it, except that the
+commit is on `main` and nobody is force-pushing a shared branch to tidy up a
+ledger. It is in the history now, and every run from here to the end of time
+finds it.
+
+`--allow` names it. Taking the `CHANGELOG.md` from further up this README:
+
+```
+$ append-only CHANGELOG.md --mode prepend --after '^## ' --allow a4f1c0e21
+CHANGELOG.md — 61 commits checked, clean (1 allowed)
+
+  a4f1c0e21  Sam Okafor  2026-07-14  tidy up old entries
+    changed existing content at line 38
+    allowed: no reason given
+```
+
+Everything else is still checked — including the 60 commits *behind* the excused
+one, which is the entire difference between this and the alternative.
+
+For more than one or two, put them in a file, where the reason can live next to
+the commit. Three lines out of the nine from this org's own ledger, which was
+being edited freely for a month before the rule that now guards it:
+
+```
+# .append-only-allow
+#
+# sha        reason it is accepted
+630793817    Dan's truncation, 2026-09-02 (logbook#3)
+752c1a39d    outcome-column edit, the last before the rule (logbook#3)
+2dca89db4    cosmetic backslash fix to the line above it (logbook#27)
+```
+
+```
+$ append-only SHIFTS.md --after '^\d{4}-' --allow-from .append-only-allow
+SHIFTS.md — 66 commits checked, clean (9 allowed)
+```
+
+A `#` before the reason is optional; whole-line `#` is a comment.
+
+The alternative that ledger is using today is `--since 2dca89db4`, the newest of
+the nine. It reports `2 commits checked, clean`.
+
+### The rules the exceptions have to follow
+
+An exception mechanism is a hole in a check, so this one is built to stay
+visible and to stay honest:
+
+- **A commit sha, and nothing else.** Not a branch, not `HEAD~3`, not a tag. A
+  revision expression resolves to a different commit later, and an exception
+  that silently moves is not an exception. `--allow main` is exit 2.
+- **A sha that doesn't resolve is exit 2**, like an unknown `--since`. A typo'd
+  exception must not pass as an inert one.
+- **Excused violations are still printed**, and counted in the summary line as
+  `(N allowed)`. You cannot lose track of how many you have accumulated,
+  because the number is in front of you on every run. The diff excerpt is
+  dropped — you have read it already — but the commit, the line and the reason
+  are not.
+- **A dead exception is called out.** If an allowed commit was checked and kept
+  the rule, the run says so and tells you to drop it. Under `--since`, an
+  exception older than the baseline is expected and stays quiet; without
+  `--since`, an allowed commit that never touched the file is a mistake and
+  gets named.
+
+### Why this exists, having previously said it wouldn't
+
+This README used to say there would never be an `--allow` list, on the grounds
+that a rule with exceptions you can spell in a config file is a rule that
+erodes. That argument was about the wrong comparison.
+
+Without `--allow`, the only remedy for one bad commit is `--since`, moving the
+baseline past it. That is also an exception — it is just an anonymous one that
+takes the whole history with it. Bumping the baseline over a single cosmetic
+edit throws away the check's coverage of every commit behind it, records no
+reason anywhere a reader will find, and leaves the run reporting `0 commits
+checked, clean` until new entries arrive. Green, having examined nothing. The
+ledger above is the worked example: 2 commits covered instead of 66, to excuse
+one backslash.
+
+So the choice was never exceptions versus no exceptions. It was one named
+commit with a reason next to it, or a blanket amnesty for everything older. The
+named one erodes less, and it is the one you can read back.
+
+`--since` is still the right tool for what it is actually for: narrowing a PR
+check to the commits the PR added.
+
 ## A note on strictness
 
 This tool is stricter than most ledgers really are. Ours says "never edit an old
 line *except* to update its outcome later", and run against it the tool duly
 reports those outcome updates. That is the correct result: they *are* edits to
-old lines. If your ledger has a legitimate exception, the honest options are to
+old lines. If your ledger has a legitimate exception *by design* — a whole class
+of edits you intend to keep making — `--allow` is the wrong instrument, because
+you would be adding a sha a week to it forever. The honest options there are to
 put the mutable part above the first entry, where `--after` exempts it, or to
 keep it in a second file.
-There is no `--allow` list and there is not going to be one, because a rule with
-exceptions you can spell in a config file is a rule that erodes.
+
+`--allow` is for the commit you wish hadn't happened, not for the edits you plan
+to keep making.
 
 ## Development
 

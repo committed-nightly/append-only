@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "append-only"
-version = "0.1.0"
+version = "0.2.0"
 description = "Check that a file has only ever been appended to, across its whole git history."
 readme = "README.md"
 license = { file = "LICENSE" }
